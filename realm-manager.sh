@@ -40,14 +40,10 @@ GITHUB_REPO="zhboner/realm"
 # 管理脚本更新设置
 # ============================================================================
 
-SCRIPT_VERSION="1.0.0"
+SCRIPT_VERSION="1.0.1"
 
-# 改成你自己 GitHub 仓库中 realm.sh 的 Raw 地址
-#
-# 例如：
-# SCRIPT_UPDATE_URL="https://raw.githubusercontent.com/username/repo/main/realm.sh"
-#
-SCRIPT_UPDATE_URL="https://raw.githubusercontent.com/你的用户名/你的仓库/main/realm.sh"
+# 当前管理脚本的 GitHub Raw 地址
+SCRIPT_UPDATE_URL="https://raw.githubusercontent.com/lanjiangqaq/realm/main/realm-manager.sh"
 
 # 当前管理脚本绝对路径
 SCRIPT_PATH="$(
@@ -402,32 +398,24 @@ update_script() {
         return 1
     fi
 
-    if [[ -z "$SCRIPT_UPDATE_URL" ||
-          "$SCRIPT_UPDATE_URL" == *"你的用户名"* ||
-          "$SCRIPT_UPDATE_URL" == *"你的仓库"* ]]; then
-
-        err "尚未配置脚本更新地址"
-        echo ""
-        echo "请修改脚本顶部："
-        echo ""
-        echo 'SCRIPT_UPDATE_URL="..."'
-        echo ""
-        echo "设置为你 GitHub 仓库中的 Raw 地址"
-        return 1
-    fi
-
     info "当前脚本版本: ${SCRIPT_VERSION}"
-    info "正在从 GitHub 获取最新版..."
+    info "正在从 GitHub 获取最新版本..."
+    echo "源地址: ${SCRIPT_UPDATE_URL}"
 
     local tmp_script="/tmp/realm-manager-update.sh"
+
+    # 时间戳参数，避免缓存
+    local update_url="${SCRIPT_UPDATE_URL}?t=$(date +%s)"
 
     rm -f "$tmp_script"
 
     if ! curl -fL \
         --connect-timeout 10 \
         --max-time 60 \
+        -H "Cache-Control: no-cache" \
+        -H "Pragma: no-cache" \
         -o "$tmp_script" \
-        "$SCRIPT_UPDATE_URL"; then
+        "$update_url"; then
 
         err "下载新版管理脚本失败"
         rm -f "$tmp_script"
@@ -440,6 +428,7 @@ update_script() {
         return 1
     fi
 
+    # 检查 Bash
     if ! head -n 1 "$tmp_script" | grep -qE '^#!.*bash'; then
         err "下载的文件不是有效的 Bash 脚本"
         rm -f "$tmp_script"
@@ -456,6 +445,7 @@ update_script() {
 
     ok "新脚本语法检查通过"
 
+    # 获取远程版本
     local remote_version
 
     remote_version="$(
@@ -467,7 +457,13 @@ update_script() {
     if [[ -n "$remote_version" ]]; then
         info "远程脚本版本: ${remote_version}"
     else
-        warn "无法读取远程脚本版本"
+        warn "远程脚本没有 SCRIPT_VERSION"
+    fi
+
+    # 如果版本相同，也允许强制更新
+    if [[ "$remote_version" == "$SCRIPT_VERSION" ]]; then
+        warn "远程版本与当前版本相同"
+        echo "仍然可以强制重新下载最新 main 版本"
     fi
 
     echo ""
@@ -480,6 +476,10 @@ update_script() {
         return 0
     fi
 
+    # ------------------------------------------------------------------------
+    # 备份当前脚本
+    # ------------------------------------------------------------------------
+
     local backup_script="${SCRIPT_PATH}.bak"
 
     info "正在备份当前脚本..."
@@ -490,7 +490,17 @@ update_script() {
         return 1
     fi
 
+    # ------------------------------------------------------------------------
+    # 设置权限
+    # ------------------------------------------------------------------------
+
     chmod +x "$tmp_script"
+
+    # ------------------------------------------------------------------------
+    # 替换
+    # ------------------------------------------------------------------------
+
+    info "正在替换当前管理脚本..."
 
     if ! mv -f "$tmp_script" "$SCRIPT_PATH"; then
         err "替换管理脚本失败"
@@ -505,6 +515,10 @@ update_script() {
 
     chmod +x "$SCRIPT_PATH"
 
+    # ------------------------------------------------------------------------
+    # 完成
+    # ------------------------------------------------------------------------
+
     ok "管理脚本更新成功"
 
     if [[ -n "$remote_version" ]]; then
@@ -514,7 +528,7 @@ update_script() {
     rm -f "$backup_script"
 
     echo ""
-    echo "正在启动新版管理脚本..."
+    echo "正在启动最新版本..."
     sleep 1
 
     exec "$SCRIPT_PATH"
@@ -878,23 +892,16 @@ add_rule() {
     read -rp "规则备注(便于识别，如 SG-to-JP-Hy2): " remark
     remark=${remark:-未命名规则}
 
-    # ------------------------------------------------------------------------
-    # 1. 监听端口
-    # ------------------------------------------------------------------------
-
+    # 1. 本地监听端口
     read -rp "本地监听端口: " listen_port
 
     if ! [[ "$listen_port" =~ ^[0-9]+$ ]] ||
        (( listen_port < 1 || listen_port > 65535 )); then
-
         err "端口必须是 1-65535 的数字"
         return 1
     fi
 
-    # ------------------------------------------------------------------------
     # 2. 出口目标地址
-    # ------------------------------------------------------------------------
-
     read -rp "出口目标地址 (IP 或域名:端口): " remote_addr
 
     if [[ -z "$remote_addr" ]]; then
@@ -902,10 +909,7 @@ add_rule() {
         return 1
     fi
 
-    # ------------------------------------------------------------------------
-    # 3. 双栈设置
-    # ------------------------------------------------------------------------
-
+    # 3. 双栈
     read -rp "是否双栈转发(同时监听 IPv4 + IPv6)？(Y/n): " dual_stack
 
     local listen_addr
@@ -916,10 +920,7 @@ add_rule() {
         listen_addr="[::]:${listen_port}"
     fi
 
-    # ------------------------------------------------------------------------
     # 初始化高级选项
-    # ------------------------------------------------------------------------
-
     EP_NO_TCP=""
     EP_USE_UDP=""
 
@@ -939,10 +940,7 @@ add_rule() {
     EP_THROUGH_LINE=""
     EP_IFACE_LINE=""
 
-    # ------------------------------------------------------------------------
     # 高级选项
-    # ------------------------------------------------------------------------
-
     echo ""
     echo "高级选项 (可多选，空格分隔序号，直接回车表示不需要):"
     echo "  1) TCP/UDP 独立开关"
@@ -966,16 +964,9 @@ add_rule() {
         esac
     done
 
-    # ------------------------------------------------------------------------
-    # 规则唯一 ID
-    # ------------------------------------------------------------------------
-
+    # 唯一 ID
     local rule_id
     rule_id="$(date +%s%N)"
-
-    # ------------------------------------------------------------------------
-    # 写入配置
-    # ------------------------------------------------------------------------
 
     {
         echo ""
@@ -1031,10 +1022,6 @@ add_rule() {
         echo "# @rule-end"
 
     } >> "$CONFIG_FILE"
-
-    # ------------------------------------------------------------------------
-    # 完成提示
-    # ------------------------------------------------------------------------
 
     ok "规则已添加"
     echo "  备注: ${remark}"
