@@ -1,4 +1,4 @@
-# realm
+# Realm
 
 易上手realm的一键转发管理脚本，终端菜单式操作，覆盖 realm 官方支持的绝大部分功能：双栈转发、TCP/UDP独立开关、WS/TLS/WSS隧道封装、MPTCP、PROXY protocol、多出口负载均衡、出口IP/网卡绑定，并通过 systemd 托管服务。
 
