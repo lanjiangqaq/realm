@@ -239,14 +239,16 @@ service_control() {
 # 传输层(WS/TLS/WSS)构造器 —— 分别用于 listen_transport / remote_transport
 # ----------------------------------------------------------------------------
 build_transport_string() {
+    # 注意: 本函数通过 $(...) 被调用方捕获返回值，
+    # 所有仅用于展示的输出必须写到 stderr(>&2)，只有最终 result 走 stdout
     local side="$1"  # "监听端(服务端)" 或 "出口端(客户端)"
     local result=""
-    echo ""
-    echo "  ${side} 传输层封装:"
-    echo "    0) 不封装 (纯TCP/UDP)"
-    echo "    1) WebSocket (ws)"
-    echo "    2) TLS"
-    echo "    3) WebSocket + TLS (wss)"
+    echo "" >&2
+    echo "  ${side} 传输层封装:" >&2
+    echo "    0) 不封装 (纯TCP/UDP)" >&2
+    echo "    1) WebSocket (ws)" >&2
+    echo "    2) TLS" >&2
+    echo "    3) WebSocket + TLS (wss)" >&2
     read -rp "  选择 [0-3，默认0]: " t_choice
     t_choice=${t_choice:-0}
 
@@ -297,6 +299,82 @@ build_transport_string() {
 # ----------------------------------------------------------------------------
 # 添加转发规则
 # ----------------------------------------------------------------------------
+adv_opt_tcp_udp() {
+    echo ""
+    echo "  --- TCP/UDP 独立开关 (仅对本条规则生效，覆盖全局设置) ---"
+    read -rp "  关闭本条规则的 TCP 转发？(y/N): " a
+    [[ "$a" == "y" || "$a" == "Y" ]] && EP_NO_TCP="true"
+    read -rp "  关闭本条规则的 UDP 转发？(y/N): " a
+    [[ "$a" == "y" || "$a" == "Y" ]] && EP_USE_UDP="false"
+}
+
+adv_opt_balance() {
+    echo ""
+    echo "  --- 多出口负载均衡 ---"
+    read -rp "  主出口权重 (数字, 默认1): " w0
+    w0=${w0:-1}
+    local extras=() weights=("$w0")
+    while true; do
+        read -rp "  追加一个出口地址 (留空结束): " extra
+        [[ -z "$extra" ]] && break
+        read -rp "    该出口权重 (默认1): " wN
+        wN=${wN:-1}
+        extras+=("\"$extra\"")
+        weights+=("$wN")
+    done
+    echo "  负载均衡算法: 1) roundrobin(轮询)  2) iphash(同一来源IP固定同一出口)"
+    read -rp "  选择 [1-2，默认1]: " lb_algo
+    local algo="roundrobin"
+    [[ "$lb_algo" == "2" ]] && algo="iphash"
+    local w_joined
+    w_joined=$(IFS=,; echo "${weights[*]}")
+    EP_BALANCE_LINE="balance = \"${algo}: ${w_joined}\""
+    if [[ ${#extras[@]} -gt 0 ]]; then
+        local e_joined
+        e_joined=$(IFS=,; echo "${extras[*]}")
+        EP_EXTRA_REMOTES="extra_remotes = [${e_joined}]"
+    fi
+}
+
+adv_opt_transport() {
+    echo ""
+    echo "  --- WS/TLS/WSS 隧道封装 ---"
+    EP_LISTEN_TRANSPORT=$(build_transport_string "监听端(服务端)")
+    EP_REMOTE_TRANSPORT=$(build_transport_string "出口端(客户端)")
+}
+
+adv_opt_mptcp() {
+    echo ""
+    echo "  --- MPTCP (需内核>5.6 且已开启 net.mptcp.enabled=1) ---"
+    read -rp "  为本条规则单独启用 MPTCP？(Y/n): " a
+    if [[ "$a" != "n" && "$a" != "N" ]]; then
+        EP_SEND_MPTCP="true"
+        EP_ACCEPT_MPTCP="true"
+    fi
+}
+
+adv_opt_proxy_protocol() {
+    echo ""
+    echo "  --- PROXY protocol (仅对本条规则生效，覆盖全局设置) ---"
+    read -rp "  向出口发送 PROXY protocol 头？(y/N): " a
+    if [[ "$a" == "y" || "$a" == "Y" ]]; then
+        EP_SEND_PROXY="true"
+        read -rp "    发送版本 (1/2, 默认2): " v
+        EP_PROXY_VERSION="${v:-2}"
+    fi
+    read -rp "  监听端接收 PROXY protocol 头？(y/N): " a
+    [[ "$a" == "y" || "$a" == "Y" ]] && EP_ACCEPT_PROXY="true"
+}
+
+adv_opt_bind() {
+    echo ""
+    echo "  --- 绑定出口IP/网卡 (多IP/多网卡机器分流用) ---"
+    read -rp "  出口IP (through, 留空跳过): " through_ip
+    read -rp "  出口网卡名 (interface, 留空跳过): " iface_name
+    [[ -n "$through_ip" ]] && EP_THROUGH_LINE="through = \"${through_ip}\""
+    [[ -n "$iface_name" ]] && EP_IFACE_LINE="interface = \"${iface_name}\""
+}
+
 add_rule() {
     require_installed || return 1
     echo -e "${BOLD}=== 添加转发规则 ===${NC}"
@@ -309,84 +387,48 @@ add_rule() {
         err "端口必须为数字"; return 1
     fi
 
-    echo ""
-    echo "监听地址模式:"
-    echo "  1) 双栈 (同时接受 IPv4 + IPv6 连接，推荐)"
-    echo "  2) 仅 IPv4 (0.0.0.0)"
-    echo "  3) 仅 IPv6 ([::])"
-    read -rp "选择 [1-3，默认1]: " stack_choice
-    stack_choice=${stack_choice:-1}
-    case "$stack_choice" in
-        2) listen_addr="0.0.0.0:${listen_port}" ;;
-        3) listen_addr="[::]:${listen_port}" ;;
-        *) listen_addr="[::]:${listen_port}" ;;  # 全局 ipv6_only=false 时 [::] 即双栈监听
-    esac
-
-    echo ""
-    read -rp "是否配置多出口负载均衡？(y/N): " use_balance
-    local remote_addr="" extra_remotes="" balance_line=""
-    if [[ "$use_balance" == "y" || "$use_balance" == "Y" ]]; then
-        read -rp "主出口地址 (ip_或域名:端口): " remote_addr
-        read -rp "主出口权重 (数字, 默认1): " w0
-        w0=${w0:-1}
-        local extras=() weights=("$w0")
-        while true; do
-            read -rp "追加一个出口地址 (留空结束): " extra
-            [[ -z "$extra" ]] && break
-            read -rp "  该出口权重 (默认1): " wN
-            wN=${wN:-1}
-            extras+=("\"$extra\"")
-            weights+=("$wN")
-        done
-        echo ""
-        echo "负载均衡算法: 1) roundrobin(轮询)  2) iphash(同一来源IP固定同一出口)"
-        read -rp "选择 [1-2，默认1]: " lb_algo
-        local algo="roundrobin"
-        [[ "$lb_algo" == "2" ]] && algo="iphash"
-        local w_joined
-        w_joined=$(IFS=,; echo "${weights[*]}")
-        balance_line="balance = \"${algo}: ${w_joined}\""
-        if [[ ${#extras[@]} -gt 0 ]]; then
-            local e_joined
-            e_joined=$(IFS=,; echo "${extras[*]}")
-            extra_remotes="extra_remotes = [${e_joined}]"
-        fi
+    read -rp "是否双栈转发(同时监听 IPv4 + IPv6)？(Y/n): " dual_stack
+    local listen_addr
+    if [[ "$dual_stack" == "n" || "$dual_stack" == "N" ]]; then
+        listen_addr="0.0.0.0:${listen_port}"
     else
-        read -rp "出口目标地址 (ip_或域名:端口): " remote_addr
+        listen_addr="[::]:${listen_port}"  # 全局 ipv6_only=false 时 [::] 即双栈监听
     fi
 
+    read -rp "出口目标地址 (ip_或域名:端口): " remote_addr
     if [[ -z "$remote_addr" ]]; then
         err "出口地址不能为空"; return 1
     fi
 
-    local listen_transport remote_transport
-    echo ""
-    read -rp "是否需要 WS/TLS/WSS 隧道封装？(y/N): " use_transport
-    if [[ "$use_transport" == "y" || "$use_transport" == "Y" ]]; then
-        listen_transport=$(build_transport_string "监听端(服务端)")
-        remote_transport=$(build_transport_string "出口端(客户端)")
-    fi
+    # 各高级选项的输出变量，默认全部为空
+    EP_NO_TCP=""; EP_USE_UDP=""
+    EP_EXTRA_REMOTES=""; EP_BALANCE_LINE=""
+    EP_LISTEN_TRANSPORT=""; EP_REMOTE_TRANSPORT=""
+    EP_SEND_MPTCP=""; EP_ACCEPT_MPTCP=""
+    EP_SEND_PROXY=""; EP_ACCEPT_PROXY=""; EP_PROXY_VERSION=""
+    EP_THROUGH_LINE=""; EP_IFACE_LINE=""
 
     echo ""
-    read -rp "是否为本条规则单独启用 MPTCP (需内核>5.6且已开启 net.mptcp.enabled=1)？(y/N): " use_mptcp
-    local mptcp_block=""
-    if [[ "$use_mptcp" == "y" || "$use_mptcp" == "Y" ]]; then
-        mptcp_block="
+    echo "高级选项 (可多选，空格分隔序号，直接回车表示不需要):"
+    echo "  1) TCP/UDP 独立开关"
+    echo "  2) 多出口负载均衡"
+    echo "  3) WS/TLS/WSS 隧道封装"
+    echo "  4) MPTCP"
+    echo "  5) PROXY protocol"
+    echo "  6) 绑定出口IP/网卡"
+    read -rp "选择: " -a adv_choices
 
-[endpoints.network]
-send_mptcp = true
-accept_mptcp = true"
-    fi
-
-    echo ""
-    read -rp "是否绑定指定出口IP或网卡 (多IP机器按流量分流时用)？(y/N): " use_bind
-    local through_line="" iface_line=""
-    if [[ "$use_bind" == "y" || "$use_bind" == "Y" ]]; then
-        read -rp "  出口IP (through, 留空跳过): " through_ip
-        read -rp "  出口网卡名 (interface, 留空跳过): " iface_name
-        [[ -n "$through_ip" ]] && through_line="through = \"${through_ip}\""
-        [[ -n "$iface_name" ]] && iface_line="interface = \"${iface_name}\""
-    fi
+    for c in "${adv_choices[@]}"; do
+        case "$c" in
+            1) adv_opt_tcp_udp ;;
+            2) adv_opt_balance ;;
+            3) adv_opt_transport ;;
+            4) adv_opt_mptcp ;;
+            5) adv_opt_proxy_protocol ;;
+            6) adv_opt_bind ;;
+            *) warn "忽略无效选项: $c" ;;
+        esac
+    done
 
     local rule_id
     rule_id=$(date +%s)
@@ -397,13 +439,26 @@ accept_mptcp = true"
         echo "[[endpoints]]"
         echo "listen = \"${listen_addr}\""
         echo "remote = \"${remote_addr}\""
-        [[ -n "$extra_remotes" ]] && echo "$extra_remotes"
-        [[ -n "$balance_line" ]] && echo "$balance_line"
-        [[ -n "$through_line" ]] && echo "$through_line"
-        [[ -n "$iface_line" ]] && echo "$iface_line"
-        [[ -n "$listen_transport" ]] && echo "listen_transport = \"${listen_transport}\""
-        [[ -n "$remote_transport" ]] && echo "remote_transport = \"${remote_transport}\""
-        [[ -n "$mptcp_block" ]] && echo "$mptcp_block"
+        [[ -n "$EP_EXTRA_REMOTES" ]] && echo "$EP_EXTRA_REMOTES"
+        [[ -n "$EP_BALANCE_LINE" ]] && echo "$EP_BALANCE_LINE"
+        [[ -n "$EP_THROUGH_LINE" ]] && echo "$EP_THROUGH_LINE"
+        [[ -n "$EP_IFACE_LINE" ]] && echo "$EP_IFACE_LINE"
+        [[ -n "$EP_LISTEN_TRANSPORT" ]] && echo "listen_transport = \"${EP_LISTEN_TRANSPORT}\""
+        [[ -n "$EP_REMOTE_TRANSPORT" ]] && echo "remote_transport = \"${EP_REMOTE_TRANSPORT}\""
+
+        # 所有 endpoint 级别的 network 覆盖项合并进同一张表，避免重复表头
+        if [[ -n "$EP_NO_TCP$EP_USE_UDP$EP_SEND_MPTCP$EP_ACCEPT_MPTCP$EP_SEND_PROXY$EP_ACCEPT_PROXY" ]]; then
+            echo ""
+            echo "[endpoints.network]"
+            [[ -n "$EP_NO_TCP" ]] && echo "no_tcp = ${EP_NO_TCP}"
+            [[ -n "$EP_USE_UDP" ]] && echo "use_udp = ${EP_USE_UDP}"
+            [[ -n "$EP_SEND_MPTCP" ]] && echo "send_mptcp = ${EP_SEND_MPTCP}"
+            [[ -n "$EP_ACCEPT_MPTCP" ]] && echo "accept_mptcp = ${EP_ACCEPT_MPTCP}"
+            [[ -n "$EP_SEND_PROXY" ]] && echo "send_proxy = ${EP_SEND_PROXY}"
+            [[ -n "$EP_SEND_PROXY" && -n "$EP_PROXY_VERSION" ]] && echo "send_proxy_version = ${EP_PROXY_VERSION}"
+            [[ -n "$EP_ACCEPT_PROXY" ]] && echo "accept_proxy = ${EP_ACCEPT_PROXY}"
+        fi
+
         echo "# @rule-end"
     } >> "$CONFIG_FILE"
 
