@@ -77,4 +77,4 @@ sudo ./realm-manager.sh
 
 ## 免责声明
 
-本脚本仅对 [zhboner/realm](https://github.com/zhboner/realm) 做安装与配置管理封装，转发行为的合法合规性由使用者自行负责。
+本脚本仅对realm做安装与配置管理封装，转发行为的合法合规性由使用者自行负责。
