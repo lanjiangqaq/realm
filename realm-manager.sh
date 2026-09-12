@@ -2,18 +2,20 @@
 
 # ============================================================================
 # Realm 一键转发管理脚本
+#
 # 功能:
-#   - 安装 / 更新 / 卸载 Realm
-#   - 双栈 IPv4 + IPv6 转发
+#   - 安装 / 更新 Realm
+#   - 更新本管理脚本
+#   - 卸载 Realm + 删除本管理脚本
+#   - 双栈 IPv4 + IPv6
 #   - TCP / UDP
 #   - WS / TLS / WSS
 #   - MPTCP
 #   - PROXY protocol
-#   - 多出口负载均衡 roundrobin / iphash
+#   - 多出口负载均衡
 #   - 出口 IP / 网卡绑定
 #   - DNS 设置
 #   - systemd 服务管理
-#   - 卸载时删除 Realm、配置、服务文件以及本管理脚本自身
 #
 # 上游项目:
 # https://github.com/zhboner/realm
@@ -34,8 +36,25 @@ SERVICE_FILE="/etc/systemd/system/realm.service"
 
 GITHUB_REPO="zhboner/realm"
 
-# 当前管理脚本自身路径
-SCRIPT_PATH="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")"
+# ============================================================================
+# 管理脚本更新设置
+# ============================================================================
+
+SCRIPT_VERSION="1.0.0"
+
+# 改成你自己 GitHub 仓库中 realm.sh 的 Raw 地址
+#
+# 例如：
+# SCRIPT_UPDATE_URL="https://raw.githubusercontent.com/username/repo/main/realm.sh"
+#
+SCRIPT_UPDATE_URL="https://raw.githubusercontent.com/你的用户名/你的仓库/main/realm.sh"
+
+# 当前管理脚本绝对路径
+SCRIPT_PATH="$(
+    readlink -f "$0" 2>/dev/null ||
+    realpath "$0" 2>/dev/null ||
+    echo "$0"
+)"
 
 MARKER_LINE="# ===== ENDPOINTS BELOW (由脚本管理，规则块请通过菜单增删) ====="
 
@@ -51,7 +70,7 @@ BOLD="\033[1m"
 NC="\033[0m"
 
 # ============================================================================
-# 输出函数
+# 输出
 # ============================================================================
 
 info() {
@@ -81,14 +100,15 @@ pause() {
 check_root() {
     if [[ $EUID -ne 0 ]]; then
         err "请使用 root 用户运行本脚本"
-        echo "例如: sudo -i"
+        echo "例如：sudo -i"
         exit 1
     fi
 }
 
 check_systemd() {
     if ! command -v systemctl >/dev/null 2>&1; then
-        err "未检测到 systemd，本脚本依赖 systemd 管理服务"
+        err "未检测到 systemd"
+        err "本脚本依赖 systemd 管理 Realm 服务"
         exit 1
     fi
 }
@@ -105,7 +125,7 @@ check_dependencies() {
     if [[ ${#missing[@]} -gt 0 ]]; then
         err "缺少必要命令: ${missing[*]}"
         echo ""
-        echo "Debian / Ubuntu 可以执行:"
+        echo "Debian / Ubuntu 可以执行："
         echo "apt update && apt install -y curl tar gawk sed grep coreutils"
         return 1
     fi
@@ -123,7 +143,7 @@ detect_arch_libc() {
 
     machine="$(uname -m)"
 
-    if command -v ldd >/dev/null 2>&1 && \
+    if command -v ldd >/dev/null 2>&1 &&
        ldd --version 2>&1 | grep -qi musl; then
         libc="musl"
     elif [[ -f /etc/alpine-release ]]; then
@@ -157,7 +177,7 @@ detect_arch_libc() {
 }
 
 # ============================================================================
-# 获取最新版本
+# 获取最新 Realm 版本
 # ============================================================================
 
 get_latest_version() {
@@ -276,13 +296,13 @@ EOF
 install_or_update_realm() {
     detect_arch_libc || return 1
 
-    info "正在获取最新版本号..."
+    info "正在获取最新 Realm 版本..."
 
     local version
     version="$(get_latest_version)"
 
     if [[ -z "$version" ]]; then
-        err "获取版本信息失败"
+        err "获取 Realm 版本失败"
         echo "请检查本机到 GitHub 的网络连通性"
         return 1
     fi
@@ -307,9 +327,10 @@ install_or_update_realm() {
         "$url"; then
 
         err "Realm 下载失败"
-        echo "请确认:"
+        echo ""
+        echo "请确认："
         echo "1. GitHub 网络正常"
-        echo "2. 该架构发行包存在"
+        echo "2. 当前架构的发行包存在"
         echo "3. 没有触发 GitHub 限流"
 
         rm -f "$tmp_archive"
@@ -358,12 +379,170 @@ install_or_update_realm() {
         if systemctl is-active --quiet realm; then
             ok "Realm 服务已重新启动"
         else
-            warn "Realm 服务启动失败，请选择菜单 5 查看状态"
+            warn "Realm 服务启动失败，请使用菜单 5 查看状态"
         fi
     fi
 
-    ok "Realm ${version} 安装/更新完成"
+    ok "Realm ${version} 安装 / 更新完成"
     ok "架构: ${ARCH_TRIPLE}"
+}
+
+# ============================================================================
+# 更新管理脚本
+# ============================================================================
+
+update_script() {
+    echo ""
+    echo -e "${BOLD}=== 更新 Realm 管理脚本 ===${NC}"
+    echo ""
+
+    if [[ ! -f "$SCRIPT_PATH" ]]; then
+        err "无法确定当前脚本文件位置"
+        echo "当前路径: $SCRIPT_PATH"
+        return 1
+    fi
+
+    if [[ -z "$SCRIPT_UPDATE_URL" ||
+          "$SCRIPT_UPDATE_URL" == *"你的用户名"* ||
+          "$SCRIPT_UPDATE_URL" == *"你的仓库"* ]]; then
+
+        err "尚未配置脚本更新地址"
+        echo ""
+        echo "请修改脚本顶部："
+        echo ""
+        echo 'SCRIPT_UPDATE_URL="..."'
+        echo ""
+        echo "设置为你 GitHub 仓库中的 Raw 地址"
+        return 1
+    fi
+
+    info "当前脚本版本: ${SCRIPT_VERSION}"
+    info "正在从 GitHub 获取最新版..."
+
+    local tmp_script="/tmp/realm-manager-update.sh"
+
+    rm -f "$tmp_script"
+
+    if ! curl -fL \
+        --connect-timeout 10 \
+        --max-time 60 \
+        -o "$tmp_script" \
+        "$SCRIPT_UPDATE_URL"; then
+
+        err "下载新版管理脚本失败"
+        rm -f "$tmp_script"
+        return 1
+    fi
+
+    if [[ ! -s "$tmp_script" ]]; then
+        err "下载的脚本为空"
+        rm -f "$tmp_script"
+        return 1
+    fi
+
+    # ------------------------------------------------------------------------
+    # 检查 Shebang
+    # ------------------------------------------------------------------------
+
+    if ! head -n 1 "$tmp_script" | grep -qE '^#!.*bash'; then
+        err "下载的文件不是有效的 Bash 脚本"
+        rm -f "$tmp_script"
+        return 1
+    fi
+
+    # ------------------------------------------------------------------------
+    # Bash 语法检查
+    # ------------------------------------------------------------------------
+
+    info "正在检查新脚本语法..."
+
+    if ! bash -n "$tmp_script"; then
+        err "新脚本语法检查失败，拒绝更新"
+        rm -f "$tmp_script"
+        return 1
+    fi
+
+    ok "新脚本语法检查通过"
+
+    # ------------------------------------------------------------------------
+    # 获取远程脚本版本
+    # ------------------------------------------------------------------------
+
+    local remote_version
+
+    remote_version="$(
+        grep -E '^SCRIPT_VERSION=' "$tmp_script" |
+        head -1 |
+        cut -d'"' -f2
+    )"
+
+    if [[ -n "$remote_version" ]]; then
+        info "远程脚本版本: ${remote_version}"
+    else
+        warn "无法读取远程脚本版本"
+    fi
+
+    echo ""
+
+    read -rp "确认更新管理脚本？(Y/n): " confirm
+
+    if [[ "$confirm" == "n" || "$confirm" == "N" ]]; then
+        info "已取消"
+        rm -f "$tmp_script"
+        return 0
+    fi
+
+    # ------------------------------------------------------------------------
+    # 备份当前脚本
+    # ------------------------------------------------------------------------
+
+    local backup_script="${SCRIPT_PATH}.bak"
+
+    info "正在备份当前脚本..."
+
+    if ! cp -f "$SCRIPT_PATH" "$backup_script"; then
+        err "备份当前脚本失败，取消更新"
+        rm -f "$tmp_script"
+        return 1
+    fi
+
+    # ------------------------------------------------------------------------
+    # 设置权限
+    # ------------------------------------------------------------------------
+
+    chmod +x "$tmp_script"
+
+    # ------------------------------------------------------------------------
+    # 替换当前脚本
+    # ------------------------------------------------------------------------
+
+    if ! mv -f "$tmp_script" "$SCRIPT_PATH"; then
+        err "替换管理脚本失败"
+
+        if [[ -f "$backup_script" ]]; then
+            cp -f "$backup_script" "$SCRIPT_PATH"
+        fi
+
+        rm -f "$tmp_script"
+        return 1
+    fi
+
+    chmod +x "$SCRIPT_PATH"
+
+    ok "管理脚本更新成功"
+
+    if [[ -n "$remote_version" ]]; then
+        echo "版本: ${SCRIPT_VERSION} -> ${remote_version}"
+    fi
+
+    rm -f "$backup_script"
+
+    echo ""
+    echo "正在启动新版管理脚本..."
+    sleep 1
+
+    # 使用 exec 替换当前进程
+    exec "$SCRIPT_PATH"
 }
 
 # ============================================================================
@@ -372,7 +551,11 @@ install_or_update_realm() {
 
 uninstall_realm() {
     echo ""
-    echo -e "${RED}${BOLD}警告：此操作将删除 Realm、配置、日志、systemd 服务以及当前管理脚本！${NC}"
+    echo -e "${RED}${BOLD}警告：此操作将删除以下内容：${NC}"
+    echo ""
+    echo "  /etc/realm/"
+    echo "  /etc/systemd/system/realm.service"
+    echo "  当前 Realm 管理脚本"
     echo ""
 
     read -rp "确认继续？(y/N): " confirm
@@ -384,26 +567,51 @@ uninstall_realm() {
 
     echo ""
 
+    # ------------------------------------------------------------------------
+    # 停止服务
+    # ------------------------------------------------------------------------
+
     info "正在停止 realm 服务..."
     systemctl stop realm 2>/dev/null || true
+
+    # ------------------------------------------------------------------------
+    # 禁用开机启动
+    # ------------------------------------------------------------------------
 
     info "正在禁用 realm 开机自启..."
     systemctl disable realm >/dev/null 2>&1 || true
 
+    # ------------------------------------------------------------------------
+    # 删除 systemd 服务文件
+    # ------------------------------------------------------------------------
+
     info "正在删除 systemd 服务文件..."
     rm -f "$SERVICE_FILE"
     systemctl daemon-reload
+
+    # ------------------------------------------------------------------------
+    # 删除 Realm 目录
+    # ------------------------------------------------------------------------
 
     if [[ -d "$REALM_DIR" ]]; then
         info "正在删除 Realm 程序、配置和日志..."
         rm -rf "$REALM_DIR"
     fi
 
+    # ------------------------------------------------------------------------
+    # 清理可能的运行文件
+    # ------------------------------------------------------------------------
+
     rm -f /run/realm.pid 2>/dev/null || true
+
+    # ------------------------------------------------------------------------
+    # 删除当前管理脚本自身
+    # ------------------------------------------------------------------------
 
     if [[ -n "$SCRIPT_PATH" && -f "$SCRIPT_PATH" ]]; then
         info "正在删除当前管理脚本:"
         echo "  $SCRIPT_PATH"
+
         rm -f -- "$SCRIPT_PATH"
     fi
 
@@ -417,15 +625,16 @@ uninstall_realm() {
     echo "  ✓ Realm 配置文件"
     echo "  ✓ Realm 日志"
     echo "  ✓ systemd 服务"
-    echo "  ✓ Realm 数据目录"
+    echo "  ✓ /etc/realm/"
     echo "  ✓ 当前管理脚本"
     echo ""
 
+    # 防止自删除以后继续运行主循环
     exit 0
 }
 
 # ============================================================================
-# 判断 Realm 是否已经安装
+# 判断是否安装
 # ============================================================================
 
 require_installed() {
@@ -466,10 +675,12 @@ service_control() {
                 systemctl status realm --no-pager -l
             fi
             ;;
+
         2)
             systemctl stop realm
             ok "Realm 已停止"
             ;;
+
         3)
             systemctl restart realm
 
@@ -480,15 +691,19 @@ service_control() {
                 systemctl status realm --no-pager -l
             fi
             ;;
+
         4)
             systemctl status realm --no-pager -l
             ;;
+
         5)
             journalctl -u realm -f --no-pager
             ;;
+
         0)
             return 0
             ;;
+
         *)
             warn "无效选项"
             ;;
@@ -496,7 +711,7 @@ service_control() {
 }
 
 # ============================================================================
-# WS / TLS / WSS 传输层构造器
+# WS / TLS / WSS
 # ============================================================================
 
 build_transport_string() {
@@ -539,9 +754,8 @@ build_transport_string() {
 
                 result="tls;sni=${sni}"
 
-                if [[ "$insecure" == "y" || "$insecure" == "Y" ]]; then
+                [[ "$insecure" == "y" || "$insecure" == "Y" ]] &&
                     result="${result};insecure"
-                fi
             fi
             ;;
 
@@ -567,9 +781,8 @@ build_transport_string() {
 
                 result="${result};tls;sni=${sni}"
 
-                if [[ "$insecure" == "y" || "$insecure" == "Y" ]]; then
+                [[ "$insecure" == "y" || "$insecure" == "Y" ]] &&
                     result="${result};insecure"
-                fi
             fi
             ;;
 
@@ -590,14 +803,14 @@ adv_opt_tcp_udp() {
     echo "  --- TCP/UDP 独立开关 ---"
 
     read -rp "  关闭本条规则的 TCP 转发？(y/N): " a
-    if [[ "$a" == "y" || "$a" == "Y" ]]; then
+
+    [[ "$a" == "y" || "$a" == "Y" ]] &&
         EP_NO_TCP="true"
-    fi
 
     read -rp "  关闭本条规则的 UDP 转发？(y/N): " a
-    if [[ "$a" == "y" || "$a" == "Y" ]]; then
+
+    [[ "$a" == "y" || "$a" == "Y" ]] &&
         EP_USE_UDP="false"
-    fi
 }
 
 adv_opt_balance() {
@@ -630,7 +843,8 @@ adv_opt_balance() {
 
     local algo="roundrobin"
 
-    [[ "$lb_algo" == "2" ]] && algo="iphash"
+    [[ "$lb_algo" == "2" ]] &&
+        algo="iphash"
 
     local w_joined
     w_joined="$(IFS=,; echo "${weights[*]}")"
@@ -656,7 +870,7 @@ adv_opt_transport() {
 adv_opt_mptcp() {
     echo ""
     echo "  --- MPTCP ---"
-    echo "  需要内核 > 5.6，并确保:"
+    echo "  需要内核 > 5.6，并确保："
     echo "  net.mptcp.enabled = 1"
 
     read -rp "  为本条规则单独启用 MPTCP？(Y/n): " a
@@ -682,9 +896,8 @@ adv_opt_proxy_protocol() {
 
     read -rp "  监听端接收 PROXY protocol 头？(y/N): " a
 
-    if [[ "$a" == "y" || "$a" == "Y" ]]; then
+    [[ "$a" == "y" || "$a" == "Y" ]] &&
         EP_ACCEPT_PROXY="true"
-    fi
 }
 
 adv_opt_bind() {
@@ -719,7 +932,6 @@ add_rule() {
 
     if ! [[ "$listen_port" =~ ^[0-9]+$ ]] ||
        (( listen_port < 1 || listen_port > 65535 )); then
-
         err "端口必须是 1-65535 的数字"
         return 1
     fi
@@ -742,6 +954,7 @@ add_rule() {
     fi
 
     # 初始化高级选项
+
     EP_NO_TCP=""
     EP_USE_UDP=""
 
@@ -761,7 +974,6 @@ add_rule() {
     EP_THROUGH_LINE=""
     EP_IFACE_LINE=""
 
-    # 高级选项
     echo ""
     echo "高级选项 (可多选，空格分隔序号，直接回车表示不需要):"
     echo "  1) TCP/UDP 独立开关"
@@ -785,7 +997,7 @@ add_rule() {
         esac
     done
 
-    # 内部唯一 ID，仅用于管理规则
+    # 内部唯一 ID
     local rule_id
     rule_id="$(date +%s%N)"
 
@@ -865,9 +1077,6 @@ add_rule() {
 
 # ============================================================================
 # 列出规则
-# 说明:
-#   id 只在配置文件内部使用
-#   菜单显示仅显示 用户真正需要看的 序号 / 备注 / 监听 / 出口
 # ============================================================================
 
 list_rules() {
@@ -917,15 +1126,12 @@ list_rules() {
                 l=listens[i]
                 m=remotes[i]
 
-                # 防止备注把表格撑得过宽
                 if (length(r) > 12)
                     r=substr(r,1,12) "..."
 
-                # 防止监听地址过长导致自动换行
                 if (length(l) > 15)
                     l=substr(l,1,15) "..."
 
-                # 防止出口过长导致自动换行
                 if (length(m) > 22)
                     m=substr(m,1,22) "..."
 
@@ -1013,7 +1219,7 @@ delete_rule() {
 
     mv -f "$tmpfile" "$CONFIG_FILE"
 
-    ok "规则 (序号 ${idx}) 已删除"
+    ok "规则（序号 ${idx}）已删除"
 
     read -rp "是否立即重启服务使更改生效？(Y/n): " restart_now
 
@@ -1168,6 +1374,8 @@ main_menu() {
     echo -e "${BOLD}      Realm 一键转发管理脚本${NC}"
     echo -e "${BOLD}========================================${NC}"
 
+    echo " 管理脚本版本: ${SCRIPT_VERSION}"
+
     if [[ -x "$REALM_BIN" ]]; then
 
         local status_str
@@ -1194,7 +1402,8 @@ main_menu() {
     echo " 5) 服务管理"
     echo " 6) 全局网络设置"
     echo " 7) 查看原始配置文件"
-    echo " 8) 卸载 realm（同时删除本脚本）"
+    echo " 8) 更新管理脚本"
+    echo " 9) 卸载 realm（同时删除本脚本）"
     echo " 0) 退出"
     echo "----------------------------------------"
 
@@ -1237,6 +1446,10 @@ main_menu() {
             ;;
 
         8)
+            update_script
+            ;;
+
+        9)
             uninstall_realm
             ;;
 
